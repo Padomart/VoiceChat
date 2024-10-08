@@ -1,0 +1,111 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Голосовой чат</title>
+</head>
+<body>
+    <h1>Простой голосовой чат</h1>
+    <button id="connectButton">Подключиться</button>
+    <button id="disconnectButton" disabled>Отключиться</button>
+    <div id="status">Вы не подключены</div>
+    <audio id="remoteAudio" autoplay></audio>
+
+    <script>
+        let localStream = null;
+        let peerConnection = null;
+        let socket = null;
+        const statusDiv = document.getElementById('status');
+        const connectButton = document.getElementById('connectButton');
+        const disconnectButton = document.getElementById('disconnectButton');
+        const remoteAudio = document.getElementById('remoteAudio');
+
+        const servers = {
+            iceServers: [
+                {
+                    urls: "stun:stun.l.google.com:19302"  // Используем публичный STUN-сервер Google для NAT
+                }
+            ]
+        };
+
+        // Создаем подключение к WebRTC
+        async function createPeerConnection() {
+            peerConnection = new RTCPeerConnection(servers);
+
+            // Добавляем локальный поток с микрофона в peerConnection
+            localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+
+            // Получаем удаленный аудио поток
+            peerConnection.ontrack = (event) => {
+                remoteAudio.srcObject = event.streams[0];
+            };
+
+            // Отправляем ICE кандидатов на сервер
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    socket.send(JSON.stringify({ 'candidate': event.candidate }));
+                }
+            };
+        }
+
+        // Функция для подключения к серверу
+        connectButton.addEventListener('click', async () => {
+            // Запрашиваем доступ к микрофону
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+            // Сообщаем пользователю, что он подключен
+            statusDiv.textContent = "Запрашивается доступ к микрофону...";
+
+            // Устанавливаем соединение с сервером через WebSocket
+            socket = new WebSocket("ws://localhost:8000/ws");
+
+            socket.onopen = async () => {
+                statusDiv.textContent = "Вы подключены!";
+                connectButton.disabled = true;
+                disconnectButton.disabled = false;
+
+                await createPeerConnection();
+
+                // Создаем offer для WebRTC и отправляем его на сервер
+                const offer = await peerConnection.createOffer();
+                await peerConnection.setLocalDescription(offer);
+                socket.send(JSON.stringify({ 'offer': offer }));
+            };
+
+            socket.onmessage = async (event) => {
+                const data = JSON.parse(event.data);
+
+                if (data.answer) {
+                    // Устанавливаем ответ от другого пользователя
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.answer));
+                } else if (data.offer) {
+                    // Принимаем offer от другого пользователя и отправляем ответ
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription(data.offer));
+                    const answer = await peerConnection.createAnswer();
+                    await peerConnection.setLocalDescription(answer);
+                    socket.send(JSON.stringify({ 'answer': answer }));
+                } else if (data.candidate) {
+                    // Добавляем ICE кандидатов
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+                }
+            };
+
+            socket.onclose = () => {
+                statusDiv.textContent = "Соединение закрыто";
+                connectButton.disabled = false;
+                disconnectButton.disabled = true;
+            };
+        });
+
+        // Функция для отключения
+        disconnectButton.addEventListener('click', () => {
+            if (socket) {
+                socket.close();
+                peerConnection.close();
+                statusDiv.textContent = "Вы отключены!";
+            }
+        });
+    </script>
+</body>
+</html>
